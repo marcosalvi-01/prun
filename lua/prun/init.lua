@@ -98,7 +98,7 @@ local function save_project(tbl)
 end
 
 ---Apply placeholder template substitutions.
----Supported keys: %f, %F, %cwd, %s, %p (see README).
+---Supported keys: %f, %F, %cwd, %s, %w (see README).
 ---@param str string
 ---@return string
 local function apply_template(str)
@@ -121,7 +121,7 @@ local function apply_template(str)
 		["%%F"] = fname,
 		["%%cwd"] = cwd,
 		["%%s"] = session,
-		["%%p"] = config.tmux_window,
+		["%%w"] = config.tmux_window,
 	}
 	local res = str
 	for k, v in pairs(map) do
