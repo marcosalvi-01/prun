@@ -1,9 +1,9 @@
 ---@class ProjectRunner.Config
 ---@field tmux_window   string  Target tmux window id (e.g. "1" = second window)
----@field default_pre string  Global pre‑command (optional)
----@field default_post string Global post‑command (optional)
+---@field default_pre   string  Global pre‑command (optional)
+---@field default_post  string  Global post‑command (optional)
 local default_config = {
-	tmux_window = "1", -- default: second window of active window
+	tmux_window = "1",
 	default_pre = "",
 	default_post = "",
 }
@@ -15,7 +15,7 @@ local NUM_SLOTS = 9
 local RUN_FILE = ".run"
 
 -------------------------------------------------------------------------------
--- Helpers                                                                    |
+-- Helper: project persistence                                                |
 -------------------------------------------------------------------------------
 
 ---Return absolute path of the project `.run` file.
@@ -46,19 +46,17 @@ local function load_json_file()
 	if not f then
 		return nil
 	end
-	local contents = f:read("*a")
+	local ok, parsed = pcall(vim.json.decode, f:read("*a"))
 	f:close()
-	local ok, parsed = pcall(vim.json.decode, contents)
 	return ok and parsed or nil
 end
 
----Upgrade legacy v1 flat‑string format to v2 table format.
 ---@param tbl table
 ---@return table
 local function upgrade_if_needed(tbl)
 	if tbl.slots then
 		return tbl
-	end -- already v2
+	end
 	local t = empty_project_table()
 	for i = 1, NUM_SLOTS do
 		local s = tbl[tostring(i)]
@@ -74,54 +72,50 @@ end
 local project_cache ---@type table|nil
 local function get_project()
 	if not project_cache then
-		local data = load_json_file() or empty_project_table()
-		project_cache = upgrade_if_needed(data)
+		project_cache = upgrade_if_needed(load_json_file() or empty_project_table())
 	end
 	return project_cache
 end
 
----Persist the given project table to disk.
 ---@param tbl table
 local function save_project(tbl)
 	local ok, encoded = pcall(vim.json.encode, tbl)
 	if not ok then
-		vim.notify("[prun] Failed to encode .run", vim.log.levels.ERROR)
-		return
+		return vim.notify("[prun] encode failed", vim.log.levels.ERROR)
 	end
 	local f, err = io.open(runfile_path(), "w")
 	if not f then
-		vim.notify("[prun] Cannot write .run: " .. err, vim.log.levels.ERROR)
-		return
+		return vim.notify("[prun] write .run: " .. err, vim.log.levels.ERROR)
 	end
 	f:write(encoded)
 	f:close()
 end
 
----Apply placeholder template substitutions.
----Supported keys: %f, %F, %cwd, %s, %w (see README).
----@param str string
----@return string
+-------------------------------------------------------------------------------
+-- Helper: templating                                                        |
+-------------------------------------------------------------------------------
+
 local function apply_template(str)
 	if str == "" then
 		return str
 	end
-	local cwd = vim.fn.getcwd()
-	local file = vim.api.nvim_buf_get_name(0)
-	local fname = vim.fn.fnamemodify(file, ":t")
-	local session = ""
-	if vim.env.TMUX then
-		local h = io.popen("tmux display-message -p '#S' 2>/dev/null")
-		if h then
-			session = (h:read("*l") or "")
-			h:close()
-		end
-	end
 	local map = {
-		["%%f"] = file,
-		["%%F"] = fname,
-		["%%cwd"] = cwd,
-		["%%s"] = session,
+		["%%f"] = vim.api.nvim_buf_get_name(0),
+		["%%F"] = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t"),
+		["%%cwd"] = vim.fn.getcwd(),
 		["%%w"] = config.tmux_window,
+		["%%s"] = (function()
+			if not vim.env.TMUX then
+				return ""
+			end
+			local h = io.popen("tmux display-message -p '#S' 2>/dev/null")
+			if not h then
+				return ""
+			end
+			local s = h:read("*l") or ""
+			h:close()
+			return s
+		end)(),
 	}
 	local res = str
 	for k, v in pairs(map) do
@@ -130,12 +124,16 @@ local function apply_template(str)
 	return res
 end
 
----Send one command line to the configured tmux window.
+-------------------------------------------------------------------------------
+-- Helper: execution targets                                                 |
+-------------------------------------------------------------------------------
+
+---Send line to tmux window (quoted) – keeps previous behaviour.
 ---@param line string @Command already templated.
 ---@return boolean success
-local function send_to_tmux(line)
+local function exec_tmux(line)
 	if not vim.env.TMUX then
-		vim.notify("[prun] TMUX not detected.", vim.log.levels.ERROR)
+		vim.notify("[prun] TMUX not detected", vim.log.levels.ERROR)
 		return false
 	end
 	local quoted = vim.fn.shellescape(line, true)
@@ -144,8 +142,35 @@ local function send_to_tmux(line)
 	return ok == true or ok == 0
 end
 
+---Execute via os.execute in a detached subshell (stdout/stderr sent to Neovim).
+---@param line string
+local function exec_shell(line)
+	local ok = os.execute(line .. " >/dev/null 2>&1 &")
+	return ok == true or ok == 0
+end
+
+---Parse optional execution tag. Returns executor fn and cleaned command.
+---@param raw string
+---@return fun(string):boolean executor
+---@return string cmd
+local function parse_target(raw)
+	local tag, body = raw:match("^%[(%w+)%]%s*(.*)$")
+	if not tag then
+		return exec_tmux, raw
+	end
+	tag = tag:lower()
+	if tag == "sh" or tag == "shell" then
+		return exec_shell, body
+	elseif tag == "tmux" then
+		return exec_tmux, body
+	else
+		-- unknown tag → default to tmux
+		return exec_tmux, raw
+	end
+end
+
 -------------------------------------------------------------------------------
--- Public API                                                                 |
+-- Public API                                                                |
 -------------------------------------------------------------------------------
 local M = {}
 
@@ -175,26 +200,21 @@ function M.set_project_defaults(pre, post)
 		p._project_default_post = post
 	end
 	save_project(p)
-	vim.notify("[prun] Project defaults saved.")
+	vim.notify("[prun] Project defaults saved")
 end
 
 -------------------------------------------------------------------------------
--- Slot helpers                                                               |
+-- Slot utilities                                                            |
 -------------------------------------------------------------------------------
-
----Validate that `slot` is 1‑9.
----@param n integer
 local function assert_slot(n)
-	assert(type(n) == "number" and 1 <= n and n <= NUM_SLOTS, "slot 1‑9")
+	assert(type(n) == "number" and 1 <= n and n <= NUM_SLOTS, "slot 1-9")
 end
-
 ---Return the slot table for a given index.
----@param slot integer
+---@param i integer
 ---@return table<string,string>
-local function slot_ref(slot)
-	return get_project().slots[tostring(slot)]
+local function slot_ref(i)
+	return get_project().slots[tostring(i)]
 end
-
 ---Persist current cache to disk.
 local function persist()
 	save_project(get_project())
@@ -218,38 +238,34 @@ local function resolve_pre_post(slot_tbl)
 end
 
 -------------------------------------------------------------------------------
--- Execution                                                                  |
+-- Runner                                                                    |
 -------------------------------------------------------------------------------
-
----Run the given slot (1‑9), prompting to set it if empty.
----@param slot integer
 function M.run(slot)
 	assert_slot(slot)
 	local s = slot_ref(slot)
 	if s.cmd == "" then
-		vim.ui.input({ prompt = string.format("Set command for slot %d", slot) }, function(input)
-			if not input or input == "" then
-				return
+		return vim.ui.input({ prompt = "Set command for slot " .. slot }, function(inp)
+			if inp and inp ~= "" then
+				s.cmd = inp
+				persist()
+				M.run(slot)
 			end
-			s.cmd = input
-			persist()
-			M.run(slot)
 		end)
-		return
 	end
 	local pre, post = resolve_pre_post(s)
 	local sequence = { pre, s.cmd, post }
-	for idx, line in ipairs(sequence) do
-		if line ~= "" then
-			local expanded = apply_template(line)
+	for idx, raw in ipairs(sequence) do
+		if raw ~= "" then
+			local exec, body = parse_target(raw)
+			body = apply_template(body)
 			if idx == 1 then
-				vim.notify("[prun] running pre command")
+				vim.notify("[prun] pre ➜ " .. body)
 			elseif idx == 2 then
-				vim.notify("[prun]  " .. expanded)
+				vim.notify("[prun] cmd ➜ " .. body)
 			else
-				vim.notify("[prun] running post command")
+				vim.notify("[prun] post ➜ " .. body)
 			end
-			if not send_to_tmux(expanded) then
+			if not exec(body) then
 				break
 			end
 		end
@@ -257,7 +273,7 @@ function M.run(slot)
 end
 
 -------------------------------------------------------------------------------
--- Editing                                                                    |
+-- Editing / manage                                                          |
 -------------------------------------------------------------------------------
 
 ---Edit a slot’s cmd / pre / post values via `vim.ui.input`.
@@ -265,34 +281,27 @@ end
 function M.edit(slot)
 	assert_slot(slot)
 	local s = slot_ref(slot)
-	vim.ui.select({ "cmd", "pre", "post" }, { prompt = "Which field to edit?" }, function(field)
+	vim.ui.select({ "cmd", "pre", "post" }, { prompt = "Field to edit" }, function(field)
 		if not field then
 			return
 		end
-		vim.ui.input(
-			{ prompt = string.format("Edit %s for slot %d", field, slot), default = s[field] or "" },
-			function(val)
-				if val ~= nil then
-					s[field] = val
-					persist()
-					vim.notify("[prun] Updated.")
-				end
+		vim.ui.input({ prompt = string.format("Edit %s for %d", field, slot), default = s[field] }, function(val)
+			if val ~= nil then
+				s[field] = val
+				persist()
+				vim.notify("[prun] updated")
 			end
-		)
+		end)
 	end)
 end
 
----Delete a slot (clears cmd, pre, post).
----@param slot integer
 function M.delete(slot)
 	assert_slot(slot)
-	local s = slot_ref(slot)
-	s.cmd, s.pre, s.post = "", "", ""
+	slot_ref(slot).cmd, slot_ref(slot).pre, slot_ref(slot).post = "", "", ""
 	persist()
-	vim.notify(string.format("[prun] Cleared slot %d", slot))
+	vim.notify("[prun] cleared " .. slot)
 end
 
----Interactive UI to run/edit/delete slots.
 function M.manage()
 	local items, map = {}, {}
 	for i = 1, NUM_SLOTS do
@@ -300,7 +309,7 @@ function M.manage()
 		table.insert(items, string.format("%d: %s", i, t.cmd ~= "" and t.cmd or "<empty>"))
 		map[#items] = i
 	end
-	vim.ui.select(items, { prompt = "Manage command slot" }, function(_, idx)
+	vim.ui.select(items, { prompt = "Manage slot" }, function(_, idx)
 		if not idx then
 			return
 		end
