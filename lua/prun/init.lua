@@ -12,7 +12,7 @@ local default_config = {
 local config = vim.deepcopy(default_config)
 
 local NUM_SLOTS = 9
-local RUN_FILE = ".run"
+local RUN_FILE = ".prun"
 
 -------------------------------------------------------------------------------
 -- Helper: project persistence                                                |

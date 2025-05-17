@@ -1,6 +1,6 @@
 # prun.nvim - Project-local Command Runner
 
-A minimal Neovim plugin that lets every project keep **up to nine shell commands** (plus optional _pre_ and _post_ hooks) in a local `.run` file. Commands are dispatched to a configurable **tmux window** so output stays neatly in your terminal workflow.
+A minimal Neovim plugin that lets every project keep **up to nine shell commands** (plus optional _pre_ and _post_ hooks) in a local `.prun` file. Commands are dispatched to a configurable **tmux window** so output stays neatly in your terminal workflow.
 
 ---
 
@@ -8,14 +8,14 @@ A minimal Neovim plugin that lets every project keep **up to nine shell commands
 
 - **Nine command slots / project** - editable, runnable, deletable.
 - **Per-slot, per-project & global** _pre/post_ hooks.
-- **`.run` file** lives in the project root - commit it or add to `.gitignore`.
+- **`.prun` file** lives in the project root - commit it or add to `.gitignore`.
 - **Templating**
 
   - `%f` full path of current file
   - `%F` filename only
   - `%cwd` current working directory
   - `%s` tmux session name
-  - `%p` configured window id
+  - `%w` configured window id
 
 - Pure Lua, no external deps (just `tmux`).
 - No keymaps; clean API for you to bind.
@@ -43,7 +43,7 @@ A minimal Neovim plugin that lets every project keep **up to nine shell commands
 
 ```lua
 require("prun").setup({
-  tmux_window    = "1",           -- default window ("1" = second window)
+  tmux_window  = "1",             -- default window ("1" = second window)
   default_pre  = "echo start",    -- global pre-hook (optional)
   default_post = "echo done",     -- global post-hook (optional)
 })
@@ -58,7 +58,7 @@ local prun = require("prun")
 prun.set_project_defaults("echo project-pre", "echo project-post")
 ```
 
-These are stored in the same `.run` file.
+These are stored in the same `.prun` file.
 
 ---
 
@@ -122,6 +122,7 @@ prun.set_project_defaults(pre, post)
 | Question                     | Answer                                                  |
 | ---------------------------- | ------------------------------------------------------- |
 | _Does it work without tmux?_ | No. The plugin checks `$TMUX` and errors out if absent. |
-| _Where is the state stored?_ | One JSON-encoded `.run` file per project.               |
-| _Why 9 slots?_               | Convenience: numeric keymaps (`<F1>`-`<F2>`).           |
+| _Where is the state stored?_ | One JSON-encoded `.prun` file per project.               |
+| _Why 9 slots?_               | Convenience: numeric keymaps (`<F1>`-`<F9>`).           |
+
 ---
