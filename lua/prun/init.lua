@@ -137,7 +137,7 @@ local function exec_tmux(line)
 		return false
 	end
 	local quoted = vim.fn.shellescape(line, true)
-	local cmd = string.format("tmux send-keys -t %s %s Enter", config.tmux_window, quoted)
+	local cmd = string.format("tmux send-keys -t %s C-c C-l %s Enter", config.tmux_window, quoted)
 	local ok = os.execute(cmd)
 	return ok == true or ok == 0
 end
